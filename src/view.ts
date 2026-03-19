@@ -22,9 +22,11 @@ export class TranslateView extends ItemView {
   private progressArea: HTMLElement | null = null;
   private progressBar: HTMLProgressElement | null = null;
   private progressLabel: HTMLElement | null = null;
+  private fileInfoEl: HTMLElement | null = null;
   private isTranslating = false;
   private stopRequested = false;
   private inserted = false;
+  private activeFileHandler: (() => void) | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: ImmersiveTranslatePlugin) {
     super(leaf);
@@ -62,6 +64,18 @@ export class TranslateView extends ItemView {
     this.insertBtn.disabled = true;
     this.insertBtn.addEventListener("click", () => this.doInsert());
 
+    // File info (tracks active file)
+    this.fileInfoEl = container.createDiv("immersive-translate-file-info");
+    this.updateFileInfo();
+
+    // Listen for active file changes
+    this.activeFileHandler = () => {
+      if (!this.isTranslating && !this.state) {
+        this.updateFileInfo();
+      }
+    };
+    this.app.workspace.on("active-leaf-change", this.activeFileHandler);
+
     // Progress area (hidden by default)
     this.progressArea = container.createDiv("immersive-translate-progress");
     this.progressArea.style.display = "none";
@@ -76,6 +90,31 @@ export class TranslateView extends ItemView {
 
   async onClose(): Promise<void> {
     this.state = null;
+    if (this.activeFileHandler) {
+      this.app.workspace.off("active-leaf-change", this.activeFileHandler);
+      this.activeFileHandler = null;
+    }
+  }
+
+  private updateFileInfo(): void {
+    if (!this.fileInfoEl) return;
+    const activeFile = this.app.workspace.getActiveFile();
+    if (activeFile && activeFile.extension === "md") {
+      this.fileInfoEl.textContent = `📄 ${activeFile.path}`;
+      this.fileInfoEl.style.display = "block";
+    } else {
+      this.fileInfoEl.textContent = "No active Markdown note";
+      this.fileInfoEl.style.display = "block";
+    }
+  }
+
+  private resetToIdle(): void {
+    this.state = null;
+    this.inserted = false;
+    this.insertBtn!.disabled = true;
+    this.progressArea!.style.display = "none";
+    this.contentEl_body!.empty();
+    this.updateFileInfo();
   }
 
   private updateProgress(completed: number, total: number, hasError: boolean): void {
@@ -119,6 +158,9 @@ export class TranslateView extends ItemView {
     this.insertBtn!.disabled = true;
     this.contentEl_body!.empty();
     this.progressArea!.style.display = "none";
+
+    // Show which file is being translated
+    this.fileInfoEl!.textContent = `📄 ${activeFile.path}`;
 
     try {
       const content = await this.app.vault.read(activeFile);
@@ -235,9 +277,8 @@ export class TranslateView extends ItemView {
 
       const newContent = buildInsertedContent(content, successUnits, successTranslations);
       await this.app.vault.modify(file as any, newContent);
-      this.inserted = true;
-      this.insertBtn!.disabled = true;
       new Notice("Translations inserted into note.");
+      this.resetToIdle();
     } catch (err: any) {
       new Notice(`Insert failed: ${err.message}`);
     }
