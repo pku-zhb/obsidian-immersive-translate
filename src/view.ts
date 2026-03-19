@@ -6,9 +6,6 @@ import { buildInsertedContent } from "./inserter";
 
 export const VIEW_TYPE_TRANSLATE = "immersive-translate-view";
 
-const CONCURRENCY = 3;
-const STAGGER_MS = 200;
-
 interface TranslationState {
   units: ParagraphUnit[];
   translations: (string | null)[];
@@ -19,12 +16,14 @@ export class TranslateView extends ItemView {
   plugin: ImmersiveTranslatePlugin;
   private state: TranslationState | null = null;
   private translateBtn: HTMLButtonElement | null = null;
+  private stopBtn: HTMLButtonElement | null = null;
   private insertBtn: HTMLButtonElement | null = null;
   private contentEl_body: HTMLElement | null = null;
   private progressArea: HTMLElement | null = null;
   private progressBar: HTMLProgressElement | null = null;
   private progressLabel: HTMLElement | null = null;
   private isTranslating = false;
+  private stopRequested = false;
   private inserted = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: ImmersiveTranslatePlugin) {
@@ -55,6 +54,10 @@ export class TranslateView extends ItemView {
     this.translateBtn = toolbar.createEl("button", { text: "Translate" });
     this.translateBtn.addEventListener("click", () => this.doTranslate());
 
+    this.stopBtn = toolbar.createEl("button", { text: "Stop" });
+    this.stopBtn.disabled = true;
+    this.stopBtn.addEventListener("click", () => this.doStop());
+
     this.insertBtn = toolbar.createEl("button", { text: "Insert into Note" });
     this.insertBtn.disabled = true;
     this.insertBtn.addEventListener("click", () => this.doInsert());
@@ -82,7 +85,9 @@ export class TranslateView extends ItemView {
     this.progressBar.max = total;
     this.progressBar.value = completed;
 
-    if (completed >= total && hasError) {
+    if (this.stopRequested && completed < total) {
+      this.progressLabel.textContent = `已停止 ${completed}/${total}`;
+    } else if (completed >= total && hasError) {
       this.progressLabel.textContent = `翻译中断 ${completed}/${total}（出错）`;
     } else if (completed >= total) {
       this.progressLabel.textContent = `翻译完成 ${completed}/${total}`;
@@ -91,6 +96,11 @@ export class TranslateView extends ItemView {
     } else {
       this.progressLabel.textContent = `翻译中 ${completed}/${total}`;
     }
+  }
+
+  private doStop(): void {
+    this.stopRequested = true;
+    this.stopBtn!.disabled = true;
   }
 
   private async doTranslate(): Promise<void> {
@@ -102,8 +112,10 @@ export class TranslateView extends ItemView {
 
     if (this.isTranslating) return;
     this.isTranslating = true;
+    this.stopRequested = false;
     this.inserted = false;
     this.translateBtn!.disabled = true;
+    this.stopBtn!.disabled = false;
     this.insertBtn!.disabled = true;
     this.contentEl_body!.empty();
     this.progressArea!.style.display = "none";
@@ -116,6 +128,7 @@ export class TranslateView extends ItemView {
         new Notice("No translatable content found.");
         this.isTranslating = false;
         this.translateBtn!.disabled = false;
+        this.stopBtn!.disabled = true;
         return;
       }
 
@@ -132,7 +145,6 @@ export class TranslateView extends ItemView {
       for (const unit of units) {
         const unitDiv = this.contentEl_body!.createDiv("immersive-translate-unit");
 
-        // Render original via MarkdownRenderer
         const originalDiv = unitDiv.createDiv("immersive-translate-original");
         await MarkdownRenderer.render(
           this.app,
@@ -142,22 +154,21 @@ export class TranslateView extends ItemView {
           this.plugin
         );
 
-        // Create empty placeholder for translation
         const translatedDiv = unitDiv.createDiv("immersive-translate-translated");
         translationPlaceholders.push(translatedDiv);
       }
 
-      // Show initial progress
+      // Serial translation with stop support
       let completed = 0;
       let errorCount = 0;
       this.updateProgress(0, units.length, false);
 
-      // Concurrent translation with bounded pool
-      let nextIndex = 0;
+      for (let i = 0; i < units.length; i++) {
+        if (this.stopRequested) break;
 
-      const translateUnit = async (i: number): Promise<void> => {
+        const unit = units[i];
+
         try {
-          const unit = units[i];
           const translated = await engine.translate(
             unit.text,
             sourceLanguage,
@@ -165,7 +176,6 @@ export class TranslateView extends ItemView {
           );
           translations[i] = translated;
 
-          // Render translation with MarkdownRenderer
           let displayText = translated;
           if (unit.type === "heading") {
             const match = unit.raw.match(/^(#{1,6})\s+/);
@@ -185,37 +195,14 @@ export class TranslateView extends ItemView {
             cls: "immersive-translate-error",
             text: `翻译失败: ${err.message}`,
           });
-        } finally {
-          completed++;
-          this.updateProgress(completed, units.length, errorCount > 0);
         }
-      };
 
-      // Pool executor with stagger delay
-      const pool: Promise<void>[] = [];
+        completed++;
+        this.updateProgress(completed, units.length, errorCount > 0);
+      }
 
-      const enqueue = async (i: number): Promise<void> => {
-        if (i > 0) {
-          await new Promise((r) => setTimeout(r, STAGGER_MS));
-        }
-        await translateUnit(i);
-      };
-
-      const fillPool = (): void => {
-        while (pool.length < CONCURRENCY && nextIndex < units.length) {
-          const i = nextIndex++;
-          const p = enqueue(i).then(() => {
-            const idx = pool.indexOf(p);
-            if (idx !== -1) pool.splice(idx, 1);
-          });
-          pool.push(p);
-        }
-      };
-
-      fillPool();
-      while (pool.length > 0) {
-        await Promise.race(pool);
-        fillPool();
+      if (this.stopRequested) {
+        this.updateProgress(completed, units.length, errorCount > 0);
       }
 
       // Enable insert button if any translations succeeded
@@ -226,6 +213,7 @@ export class TranslateView extends ItemView {
     } finally {
       this.isTranslating = false;
       this.translateBtn!.disabled = false;
+      this.stopBtn!.disabled = true;
     }
   }
 
@@ -242,7 +230,6 @@ export class TranslateView extends ItemView {
     try {
       const content = await this.app.vault.read(file as any);
 
-      // Filter out failed translations (null slots)
       const successUnits = units.filter((_, i) => translations[i] !== null);
       const successTranslations = translations.filter((t) => t !== null) as string[];
 
