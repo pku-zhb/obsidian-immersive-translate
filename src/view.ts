@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, Notice } from "obsidian";
+import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf } from "obsidian";
 import type ImmersiveTranslatePlugin from "./main";
 import type { ParagraphUnit } from "./parser";
 import { parseParagraphs } from "./parser";
@@ -6,9 +6,11 @@ import { buildInsertedContent } from "./inserter";
 
 export const VIEW_TYPE_TRANSLATE = "immersive-translate-view";
 
+const CONCURRENCY = 3;
+
 interface TranslationState {
   units: ParagraphUnit[];
-  translations: string[];
+  translations: (string | null)[];
   sourceFilePath: string;
 }
 
@@ -18,6 +20,9 @@ export class TranslateView extends ItemView {
   private translateBtn: HTMLButtonElement | null = null;
   private insertBtn: HTMLButtonElement | null = null;
   private contentEl_body: HTMLElement | null = null;
+  private progressArea: HTMLElement | null = null;
+  private progressBar: HTMLProgressElement | null = null;
+  private progressLabel: HTMLElement | null = null;
   private isTranslating = false;
   private inserted = false;
 
@@ -53,12 +58,38 @@ export class TranslateView extends ItemView {
     this.insertBtn.disabled = true;
     this.insertBtn.addEventListener("click", () => this.doInsert());
 
+    // Progress area (hidden by default)
+    this.progressArea = container.createDiv("immersive-translate-progress");
+    this.progressArea.style.display = "none";
+    this.progressBar = this.progressArea.createEl("progress");
+    this.progressLabel = this.progressArea.createEl("span", {
+      cls: "progress-label",
+    });
+
     // Content body
     this.contentEl_body = container.createDiv("immersive-translate-body");
   }
 
   async onClose(): Promise<void> {
     this.state = null;
+  }
+
+  private updateProgress(completed: number, total: number, hasError: boolean): void {
+    if (!this.progressArea || !this.progressBar || !this.progressLabel) return;
+
+    this.progressArea.style.display = "flex";
+    this.progressBar.max = total;
+    this.progressBar.value = completed;
+
+    if (completed >= total && hasError) {
+      this.progressLabel.textContent = `翻译中断 ${completed}/${total}（出错）`;
+    } else if (completed >= total) {
+      this.progressLabel.textContent = `翻译完成 ${completed}/${total}`;
+    } else if (hasError) {
+      this.progressLabel.textContent = `翻译中 ${completed}/${total}（部分出错）`;
+    } else {
+      this.progressLabel.textContent = `翻译中 ${completed}/${total}`;
+    }
   }
 
   private async doTranslate(): Promise<void> {
@@ -74,6 +105,7 @@ export class TranslateView extends ItemView {
     this.translateBtn!.disabled = true;
     this.insertBtn!.disabled = true;
     this.contentEl_body!.empty();
+    this.progressArea!.style.display = "none";
 
     try {
       const content = await this.app.vault.read(activeFile);
@@ -88,52 +120,99 @@ export class TranslateView extends ItemView {
 
       const { sourceLanguage, targetLanguage } = this.plugin.settings;
       const engine = this.plugin.getEngine();
-      const translations: string[] = [];
+      const translations: (string | null)[] = new Array(units.length).fill(null);
+      const sourcePath = activeFile.path;
 
-      this.state = {
-        units,
-        translations,
-        sourceFilePath: activeFile.path,
-      };
+      this.state = { units, translations, sourceFilePath: sourcePath };
 
-      for (let i = 0; i < units.length; i++) {
-        const unit = units[i];
+      // Pre-create all unit divs with original text rendered
+      const translationPlaceholders: HTMLElement[] = [];
 
-        // Render original
-        const unitDiv = this.contentEl_body!.createDiv(
-          "immersive-translate-unit"
+      for (const unit of units) {
+        const unitDiv = this.contentEl_body!.createDiv("immersive-translate-unit");
+
+        // Render original via MarkdownRenderer
+        const originalDiv = unitDiv.createDiv("immersive-translate-original");
+        await MarkdownRenderer.render(
+          this.app,
+          unit.raw,
+          originalDiv,
+          sourcePath,
+          this.plugin
         );
-        unitDiv.createDiv({
-          cls: "immersive-translate-original",
-          text: unit.raw,
-        });
 
+        // Create empty placeholder for translation
+        const translatedDiv = unitDiv.createDiv("immersive-translate-translated");
+        translationPlaceholders.push(translatedDiv);
+      }
+
+      // Show initial progress
+      let completed = 0;
+      let errorCount = 0;
+      this.updateProgress(0, units.length, false);
+
+      // Concurrent translation with bounded pool
+      let nextIndex = 0;
+
+      const translateUnit = async (i: number): Promise<void> => {
         try {
+          const unit = units[i];
           const translated = await engine.translate(
             unit.text,
             sourceLanguage,
             targetLanguage
           );
-          translations.push(translated);
+          translations[i] = translated;
 
-          // Render translation — for headings, show with # prefix
+          // Render translation with MarkdownRenderer
           let displayText = translated;
           if (unit.type === "heading") {
             const match = unit.raw.match(/^(#{1,6})\s+/);
             displayText = match ? `${match[1]} ${translated}` : translated;
           }
-          unitDiv.createDiv({
-            cls: "immersive-translate-translated",
-            text: displayText,
-          });
+          await MarkdownRenderer.render(
+            this.app,
+            displayText,
+            translationPlaceholders[i],
+            sourcePath,
+            this.plugin
+          );
         } catch (err: any) {
-          new Notice(`Translation failed: ${err.message}`);
-          break;
+          translations[i] = null;
+          errorCount++;
+          translationPlaceholders[i].createDiv({
+            cls: "immersive-translate-error",
+            text: `翻译失败: ${err.message}`,
+          });
+        } finally {
+          completed++;
+          this.updateProgress(completed, units.length, errorCount > 0);
         }
+      };
+
+      // Pool executor
+      const pool: Promise<void>[] = [];
+
+      const fillPool = (): void => {
+        while (pool.length < CONCURRENCY && nextIndex < units.length) {
+          const i = nextIndex++;
+          const p = translateUnit(i).then(() => {
+            const idx = pool.indexOf(p);
+            if (idx !== -1) pool.splice(idx, 1);
+          });
+          pool.push(p);
+        }
+      };
+
+      fillPool();
+      while (pool.length > 0) {
+        await Promise.race(pool);
+        fillPool();
       }
 
-      // Enable insert button if we have translations
-      if (translations.length > 0) {
+      // Enable insert button if any translations succeeded
+      const successCount = translations.filter((t) => t !== null).length;
+      if (successCount > 0) {
         this.insertBtn!.disabled = false;
       }
     } finally {
@@ -154,7 +233,12 @@ export class TranslateView extends ItemView {
 
     try {
       const content = await this.app.vault.read(file as any);
-      const newContent = buildInsertedContent(content, units, translations);
+
+      // Filter out failed translations (null slots)
+      const successUnits = units.filter((_, i) => translations[i] !== null);
+      const successTranslations = translations.filter((t) => t !== null) as string[];
+
+      const newContent = buildInsertedContent(content, successUnits, successTranslations);
       await this.app.vault.modify(file as any, newContent);
       this.inserted = true;
       this.insertBtn!.disabled = true;
