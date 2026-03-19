@@ -275,7 +275,12 @@ export class TranslateView extends ItemView {
       const successUnits = units.filter((_, i) => translations[i] !== null);
       const successTranslations = translations.filter((t) => t !== null) as string[];
 
-      const newContent = buildInsertedContent(content, successUnits, successTranslations);
+      const newContent = buildInsertedContent(
+        content,
+        successUnits,
+        successTranslations,
+        this.plugin.settings.insertMode
+      );
       await this.app.vault.modify(file as any, newContent);
       new Notice("Translations inserted into note.");
       this.resetToIdle();

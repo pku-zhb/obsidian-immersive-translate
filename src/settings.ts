@@ -1,16 +1,20 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type ImmersiveTranslatePlugin from "./main";
 
+export type InsertMode = "side-by-side" | "blockquote";
+
 export interface ImmersiveTranslateSettings {
   sourceLanguage: string;
   targetLanguage: string;
   engine: string;
+  insertMode: InsertMode;
 }
 
 export const DEFAULT_SETTINGS: ImmersiveTranslateSettings = {
   sourceLanguage: "auto",
   targetLanguage: "zh-CN",
   engine: "google",
+  insertMode: "side-by-side",
 };
 
 export const LANGUAGES: Record<string, string> = {
@@ -50,6 +54,19 @@ export class ImmersiveTranslateSettingTab extends PluginSettingTab {
         dropdown.setValue(this.plugin.settings.sourceLanguage);
         dropdown.onChange(async (value) => {
           this.plugin.settings.sourceLanguage = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Insert mode")
+      .setDesc("How translations are inserted into notes")
+      .addDropdown((dropdown) => {
+        dropdown.addOption("side-by-side", "Side by side (original + translation)");
+        dropdown.addOption("blockquote", "Blockquote (original as quote, translation below)");
+        dropdown.setValue(this.plugin.settings.insertMode);
+        dropdown.onChange(async (value) => {
+          this.plugin.settings.insertMode = value as InsertMode;
           await this.plugin.saveSettings();
         });
       });
