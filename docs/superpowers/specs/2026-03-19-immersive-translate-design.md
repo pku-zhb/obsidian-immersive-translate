@@ -30,7 +30,9 @@ interface TranslationEngine {
 }
 ```
 
-**First release:** Google Translate (free, no API key required, using unofficial API).
+**First release:** Google Translate (free, no API key required, using `google-translate-api-x` or similar library that wraps the unofficial endpoint).
+
+**Error handling:** If a translation request fails (network error, rate limit), show an error notice and stop translation at the failed paragraph. The panel displays whatever was successfully translated up to that point. User can retry by clicking Translate again.
 
 **Extensibility:** Engine registry via simple Map. Adding new engines (DeepL, LLM, etc.) requires only implementing the interface and registering.
 
@@ -39,9 +41,11 @@ interface TranslationEngine {
 Reads note content and splits it into translation units by Markdown paragraphs (separated by blank lines).
 
 **Rules:**
-- Skip: frontmatter (`---`), code blocks (`` ``` ``), images, HTML tags
-- Preserve: Markdown syntax markers (list bullets, heading `#`, blockquote `>`) — translate inner text only
+- Skip: frontmatter (`---`), code blocks (`` ``` ``), images, HTML tags, math blocks (`$$`), tables, Obsidian callouts (`> [!note]`), embeds (`![[...]]`)
+- Preserve: Markdown syntax markers (list bullets, blockquote `>`) — translate inner text only
 - Translate: headings (text portion), regular paragraphs, list blocks, blockquote text
+- Headings: strip `#` markers, translate text, reassemble with original `#` level. Translated heading is inserted as a new line below the original heading (both are valid Markdown headings)
+- Lists: each list item is translated individually, preserving bullet/number markers. The translated list block is inserted after the original list block as a whole
 
 **Example input:**
 ```markdown
@@ -70,8 +74,8 @@ Custom `ItemView` rendered in the right sidebar leaf.
 
 **Behavior:**
 - Panel can be opened independently and stays open until user closes it
-- Translate button triggers translation of the currently active note
-- Insert button writes translations into the source file
+- Translate button triggers translation of the currently active note. If no Markdown note is active, show a notice and do nothing
+- Insert button writes translations into the source file. Disabled until translation is complete. After insertion, the button is disabled to prevent double-insertion; re-translating re-enables it
 - Panel remains open after insertion
 
 ### 4. Inserter (`src/inserter.ts`)
@@ -101,7 +105,7 @@ This is the first paragraph about machine learning.
 
 ## Settings (`src/settings.ts`)
 
-- **Source language**: dropdown, default "English"
+- **Source language**: dropdown, default "Auto-detect"
 - **Target language**: dropdown, default "Chinese (Simplified)"
 - **Translation engine**: dropdown (for future extensibility, currently only Google Translate)
 
