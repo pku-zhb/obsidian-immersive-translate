@@ -1,0 +1,28 @@
+.immersive-translate-container {
+  padding: 10px;
+}
+
+.immersive-translate-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.immersive-translate-toolbar button {
+  flex: 1;
+}
+
+.immersive-translate-unit {
+  margin-bottom: 16px;
+}
+
+.immersive-translate-original {
+  margin-bottom: 4px;
+}
+
+.immersive-translate-translated {
+  margin-bottom: 4px;
+  opacity: 0.85;
+}
