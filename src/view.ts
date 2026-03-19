@@ -7,6 +7,7 @@ import { buildInsertedContent } from "./inserter";
 export const VIEW_TYPE_TRANSLATE = "immersive-translate-view";
 
 const CONCURRENCY = 3;
+const STAGGER_MS = 200;
 
 interface TranslationState {
   units: ParagraphUnit[];
@@ -190,13 +191,20 @@ export class TranslateView extends ItemView {
         }
       };
 
-      // Pool executor
+      // Pool executor with stagger delay
       const pool: Promise<void>[] = [];
+
+      const enqueue = async (i: number): Promise<void> => {
+        if (i > 0) {
+          await new Promise((r) => setTimeout(r, STAGGER_MS));
+        }
+        await translateUnit(i);
+      };
 
       const fillPool = (): void => {
         while (pool.length < CONCURRENCY && nextIndex < units.length) {
           const i = nextIndex++;
-          const p = translateUnit(i).then(() => {
+          const p = enqueue(i).then(() => {
             const idx = pool.indexOf(p);
             if (idx !== -1) pool.splice(idx, 1);
           });
