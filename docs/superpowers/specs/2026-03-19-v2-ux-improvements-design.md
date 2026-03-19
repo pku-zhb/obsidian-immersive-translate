@@ -21,7 +21,7 @@ Add a progress bar below the toolbar (top-fixed, always visible):
 
 - **Idle**: Hidden
 - **Translating**: `<progress>` element + text label `"翻译中 3/12"`
-- **Complete**: Full bar + `"翻译完成 12/12"` + `Notice("翻译完成")`
+- **Complete**: Full bar + `"翻译完成 12/12"`
 - **Error**: `"翻译中断 3/12（出错）"` — bar stays at current progress
 
 ### Implementation
@@ -43,7 +43,10 @@ Use native `<progress>` HTML element — inherits Obsidian theme via CSS variabl
 | Idle | hidden | hidden | enabled | disabled |
 | Translating | animated | "翻译中 3/12" | disabled | disabled |
 | Complete | full | "翻译完成 12/12" | enabled | enabled |
-| Error | partial | "翻译中断 3/12（出错）" | enabled | disabled if 0 translations |
+| Error | partial | "翻译中断 3/12（出错）" | enabled | enabled if any translations succeeded |
+| Zero units | hidden | hidden | enabled (re-enabled) | disabled |
+
+Note: When `parseParagraphs` returns an empty array, progress bar stays hidden (early return with Notice, same as v1).
 
 ## 2. Markdown Rendering
 
@@ -61,8 +64,8 @@ Replace `createDiv({ text: ... })` with Obsidian's `MarkdownRenderer.render()` f
 await MarkdownRenderer.render(
   this.app,
   markdownText,
-  containerEl,
-  sourcePath,  // for resolving wikilinks/images
+  containerEl,  // empty <div> — render() appends into this element
+  sourcePath,   // for resolving wikilinks/images
   this.plugin
 );
 ```
@@ -70,10 +73,11 @@ await MarkdownRenderer.render(
 ### Details
 
 - Both original and translated blocks use `MarkdownRenderer.render()`
+- `MarkdownRenderer.render()` appends rendered HTML into the provided container element. For each block, create an empty `<div>` and pass it as `containerEl`. Do NOT use `innerHTML` or `textContent` assignment.
 - `sourcePath` is the active file's path — ensures wikilinks resolve correctly
-- For translated headings, render with `#` prefix so they display as headings
+- For translated headings: the `#` prefix is already part of the display text (v1 prepends it). `MarkdownRenderer.render()` will render it as a proper heading element. Original headings already have `#` in `unit.raw`, so both render symmetrically as headings.
 - The rendered output inherits the vault's current theme automatically
-- Wrap each rendered block in a `<div>` with appropriate CSS class for spacing
+- No cancellation/abort mechanism for v2 — in-flight requests complete silently if panel closes (same gap as v1, acceptable)
 
 ## 3. Concurrent Translation
 
@@ -85,10 +89,16 @@ Serial translation (one paragraph at a time) is slow for long documents.
 
 Replace the serial `for` loop with a bounded concurrency pool (max 3 concurrent requests).
 
+### Concurrency Constant
+
+```typescript
+const CONCURRENCY = 3;  // top of view.ts
+```
+
 ### Algorithm
 
 ```
-pool size = 3
+pool size = CONCURRENCY
 pending = [all units]
 active = []
 
@@ -100,20 +110,42 @@ while pending or active:
   render completed unit
 ```
 
-### Details
+### Critical: translations[] Array Contract
 
-- **Concurrency**: 3 (hardcoded, no settings needed for v2)
-- **Ordering**: Results rendered in original document order regardless of completion order. Pre-create all unit divs, fill in translations as they complete.
-- **Error handling**: A failed paragraph records an error message in its slot, does not abort remaining translations. Progress label shows partial completion.
-- **Progress update**: Each completion (success or failure) increments the counter and updates the progress bar.
+The inserter (`buildInsertedContent`) expects `translations[i]` to correspond to `units[i]`. With concurrent completion in arbitrary order:
+
+- **Use indexed assignment**: `translations[i] = translated` — NOT `push()`
+- **Pre-allocate**: `const translations: (string | null)[] = new Array(units.length).fill(null)`
+- **On success**: `translations[i] = translatedText`
+- **On failure**: `translations[i] = null` — this slot is skipped during insert
+
+### Insert with Failed Paragraphs
+
+When the user clicks Insert, filter out failed (null) paragraphs:
+
+```typescript
+// Before calling buildInsertedContent:
+const successUnits = units.filter((_, i) => translations[i] !== null);
+const successTranslations = translations.filter((t) => t !== null) as string[];
+buildInsertedContent(content, successUnits, successTranslations);
+```
+
+This ensures failed paragraphs are simply not inserted — no garbled output, no blank lines.
 
 ### Pre-created DOM Structure
 
 To maintain visual order with concurrent completion:
-1. Before starting translations, create all unit `<div>`s with original text rendered
-2. Each div has a placeholder for the translation
-3. As translations complete (in any order), fill in the corresponding placeholder
+1. Before starting translations, create all unit `<div>`s with original text rendered via `MarkdownRenderer.render()`
+2. Each unit div contains an empty `<div class="immersive-translate-translated">` as a placeholder
+3. As translations complete (in any order), call `MarkdownRenderer.render()` into the corresponding placeholder div
 4. This ensures the panel always shows paragraphs in document order
+
+### Error Handling
+
+- A failed paragraph: render error text in its placeholder (e.g., styled error message), set `translations[i] = null`
+- Does NOT abort remaining translations
+- Progress counter increments on both success and failure
+- Insert button enabled if at least one translation succeeded
 
 ## CSS Changes
 
@@ -137,12 +169,7 @@ To maintain visual order with concurrent completion:
   white-space: nowrap;
 }
 
-/* Markdown rendered content */
-.immersive-translate-original,
-.immersive-translate-translated {
-  /* Reset Obsidian's default markdown spacing for inline preview */
-}
-
+/* Markdown rendered content — use Obsidian defaults, no reset needed */
 .immersive-translate-translated {
   opacity: 0.85;
   border-left: 2px solid var(--interactive-accent);
@@ -155,7 +182,7 @@ To maintain visual order with concurrent completion:
 | File | Changes |
 |---|---|
 | `src/view.ts` | Progress bar UI, MarkdownRenderer.render(), concurrency pool |
-| `styles.css` | Progress bar styles, rendered markdown adjustments |
+| `styles.css` | Progress bar styles, translated block accent border |
 
 ## Testing
 
@@ -164,4 +191,5 @@ To maintain visual order with concurrent completion:
   - Short note (2-3 paragraphs): verify progress shows and completes
   - Long note (15+ paragraphs): verify concurrency speedup, progress updates smoothly
   - Note with headings/lists/links: verify Markdown renders correctly
-  - Network error mid-translation: verify partial progress and non-blocking behavior
+  - Network error mid-translation: verify partial progress, Insert still works for successful paragraphs
+  - Empty/no-translatable-content note: verify progress bar stays hidden
